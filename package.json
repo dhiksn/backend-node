@@ -1,0 +1,22 @@
+{
+  "name": "ytdownloader-backend",
+  "version": "1.0.0",
+  "description": "Node.js backend for yt_downloader",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.6.8",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0",
+    "youtube-dl-exec": "^3.0.0"
+  },
+  "allowScripts": {
+    "ffmpeg-static@5.3.0": true,
+    "youtube-dl-exec@3.1.7": true
+  }
+}
