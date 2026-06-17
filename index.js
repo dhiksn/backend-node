@@ -399,12 +399,6 @@ async function fetchInstagramViaSnapsave(url) {
         }
     } catch (e) {
         // Ignore yt-dlp errors
-        console.log("yt-dlp fetch failed for Instagram:", e.message);
-    }
-
-    // If yt-dlp failed to get thumbnail, use the first image from snapsave if available
-    if (!thumbnail && mediaList.length > 0 && mediaList[0].type === 'image') {
-        thumbnail = mediaList[0].url;
     }
 
     let hasVideo = false;
@@ -419,6 +413,10 @@ async function fetchInstagramViaSnapsave(url) {
     const isCarousel = mediaList.length > 1;
     const isPhoto = !hasVideo;
 
+    if (!thumbnail && isPhoto && videoFormats.length > 0) {
+        thumbnail = videoFormats[0].download_url;
+    }
+
     if (!isCarousel && !isPhoto) {
         for (let fmt of videoFormats) {
             if (fmt.resolution.includes("Video")) {
@@ -428,7 +426,7 @@ async function fetchInstagramViaSnapsave(url) {
         }
     }
 
-    return { title, description, thumbnail: thumbnail, channel, duration: null, video_formats: videoFormats, platform: "instagram", is_photo: isPhoto, is_carousel: isCarousel };
+    return { title, description, thumbnail, channel, duration: null, video_formats: videoFormats, platform: "instagram", is_photo: isPhoto, is_carousel: isCarousel };
 }
 
 // Instagram Info
