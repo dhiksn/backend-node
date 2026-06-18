@@ -382,24 +382,38 @@ async function fetchInstagramViaSnapsave(url) {
     let description = "";
     let thumbnail = "";
     
-    // Try to extract channel from yt-dlp to match Python behavior
+    // Try to extract metadata from Instagram page directly first
+    try {
+        const metaRes = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+        const $ = cheerio.load(metaRes.data);
+        const ogTitle = $('meta[property="og:title"]').attr('content');
+        const ogDesc = $('meta[property="og:description"]').attr('content');
+        
+        if (ogTitle) title = ogTitle;
+        if (ogDesc) {
+            description = ogDesc;
+            const match = ogDesc.match(/- ([a-zA-Z0-9._]+) on /);
+            if (match && match[1]) channel = `@${match[1]}`;
+        }
+    } catch (e) {}
+
+    // Fallback to yt-dlp
     try {
         const ytdlInfo = await youtubedl(url, { dumpSingleJson: true, noWarnings: true, quiet: true });
         if (ytdlInfo) {
-            const rawTitle = ytdlInfo.title || title;
-            description = ytdlInfo.description || description;
-            thumbnail = ytdlInfo.thumbnail || thumbnail;
+            if (title === "Instagram Post") title = ytdlInfo.title || title;
+            if (!description) description = ytdlInfo.description || "";
+            if (!thumbnail) thumbnail = ytdlInfo.thumbnail || "";
             
-            if (ytdlInfo.uploader) channel = `@${ytdlInfo.uploader}`;
-            else if (ytdlInfo.channel) channel = `@${ytdlInfo.channel}`;
-            else if (rawTitle.startsWith("Post by ")) channel = `@${rawTitle.substring(8)}`;
-            else if (rawTitle.startsWith("Video by ")) channel = `@${rawTitle.substring(9)}`;
-            else if (rawTitle.startsWith("Photo by ")) channel = `@${rawTitle.substring(9)}`;
-            title = rawTitle;
+            if (channel === "Instagram") {
+                if (ytdlInfo.uploader) channel = `@${ytdlInfo.uploader}`;
+                else if (ytdlInfo.channel) channel = `@${ytdlInfo.channel}`;
+                else if ((ytdlInfo.title || "").startsWith("Post by ")) channel = `@${ytdlInfo.title.substring(8)}`;
+                else if ((ytdlInfo.title || "").startsWith("Video by ")) channel = `@${ytdlInfo.title.substring(9)}`;
+                else if ((ytdlInfo.title || "").startsWith("Photo by ")) channel = `@${ytdlInfo.title.substring(9)}`;
+            }
         }
-    } catch (e) {
-        // Ignore yt-dlp errors
-    }
+    } catch (e) {}
 
     let hasVideo = false;
     const videoFormats = mediaList.filter(m => m.url).map((m, idx) => {
