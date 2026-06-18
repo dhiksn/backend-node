@@ -672,6 +672,116 @@ app.get('/download/audio', async (req, res) => {
     }
 });
 
+// --- Spotify Endpoints ---
+
+async function fetchSpotifyInfo(trackUrl) {
+    const payload = JSON.stringify({ url: trackUrl });
+    return new Promise((resolve, reject) => {
+        const options = {
+            hostname: 'musicfab.io',
+            port: 443,
+            path: '/api/spotify',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(payload),
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        };
+
+        const req = require('https').request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => { data += chunk.toString(); });
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    const metadata = json.data?.metadata;
+                    if (metadata?.download) {
+                        resolve({
+                            title: metadata.name || 'Unknown',
+                            artist: metadata.artist || 'Unknown',
+                            album: metadata.album || '',
+                            duration: metadata.duration || 0,
+                            thumbnail: metadata.image || '',
+                            download_url: metadata.download
+                        });
+                    } else {
+                        reject(new Error('Download URL not found in API response'));
+                    }
+                } catch (e) {
+                    reject(new Error(`Failed to parse API response: ${e.message}`));
+                }
+            });
+        });
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+    });
+}
+
+// Spotify Info
+app.get('/spotify/info', async (req, res) => {
+    try {
+        const url = req.query.url;
+        if (!url) return res.status(400).json({ detail: 'URL required' });
+        if (!url.includes('open.spotify.com/track')) {
+            return res.status(400).json({ detail: 'Only Spotify track URLs are supported (open.spotify.com/track/...)' });
+        }
+
+        const info = await fetchSpotifyInfo(url);
+        res.json({
+            title: info.title,
+            artist: info.artist,
+            album: info.album,
+            duration: info.duration,
+            thumbnail: info.thumbnail,
+            download_url: info.download_url,
+            platform: 'spotify'
+        });
+    } catch (e) {
+        res.status(400).json({ detail: `Gagal mengambil info Spotify: ${e.message}` });
+    }
+});
+
+// Spotify Download
+app.get('/spotify/download', async (req, res) => {
+    let { url, task_id } = req.query;
+    if (!task_id) task_id = crypto.randomUUID();
+
+    if (activeTasks.has(task_id)) return res.status(408).json({ detail: 'Timeout' });
+    activeTasks.add(task_id);
+    downloadProgress.set(task_id, { status: 'starting', progress: 0.0 });
+
+    const baseName = `temp_spotify_${task_id}`;
+    const destPath = path.join(__dirname, `${baseName}.mp3`);
+
+    try {
+        if (!url) throw new Error('URL required');
+        if (!url.includes('open.spotify.com/track')) {
+            throw new Error('Only Spotify track URLs are supported (open.spotify.com/track/...)');
+        }
+
+        downloadProgress.set(task_id, { status: 'downloading', progress: 0.1, total: 'Fetching info...', speed: '' });
+
+        const info = await fetchSpotifyInfo(url);
+
+        downloadProgress.set(task_id, { status: 'downloading', progress: 0.2, total: 'Downloading...', speed: '' });
+
+        await downloadStream(info.download_url, destPath, task_id, 0.2, 1.0);
+
+        downloadProgress.set(task_id, { status: 'completed', progress: 1.0 });
+
+        const safeTitle = getSafeFilename(`${info.artist} - ${info.title}`, 60) || `spotify_${task_id}`;
+        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+        return res.download(destPath, `${safeTitle}.mp3`);
+    } catch (e) {
+        cleanupFiles(baseName);
+        downloadProgress.set(task_id, { status: 'error', error: e.message });
+        activeTasks.delete(task_id);
+        res.status(400).json({ detail: e.message });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server listening on port ${port}`);
 });
