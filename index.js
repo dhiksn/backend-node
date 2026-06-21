@@ -674,49 +674,21 @@ app.get('/download/audio', async (req, res) => {
 
 // --- Spotify Endpoints ---
 
-async function fetchSpotifyInfo(trackUrl) {
-    const payload = JSON.stringify({ url: trackUrl });
-    return new Promise((resolve, reject) => {
-        const options = {
-            hostname: 'musicfab.io',
-            port: 443,
-            path: '/api/spotify',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload),
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        };
+const https = require('https');
 
-        const req = require('https').request(options, (res) => {
-            let data = '';
-            res.on('data', chunk => { data += chunk.toString(); });
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    const metadata = json.data?.metadata;
-                    if (metadata?.download) {
-                        resolve({
-                            title: metadata.name || 'Unknown',
-                            artist: metadata.artist || 'Unknown',
-                            album: metadata.album || '',
-                            duration: metadata.duration || 0,
-                            thumbnail: metadata.image || '',
-                            download_url: metadata.download
-                        });
-                    } else {
-                        reject(new Error('Download URL not found in API response'));
-                    }
-                } catch (e) {
-                    reject(new Error(`Failed to parse API response: ${e.message}`));
-                }
-            });
-        });
-        req.on('error', reject);
-        req.write(payload);
-        req.end();
-    });
+/**
+ * Encode a plain JS object to base64url (no padding) — mirrors JS encodeSignatureContext.
+ */
+function spotisaverEncodeCtx(obj) {
+    const json = JSON.stringify(obj);
+const util = require('util');
+const execPromise = util.promisify(require('child_process').exec);
+
+async function fetchSpotifyInfo(trackUrl) {
+    const { stdout } = await execPromise(`python spotisaver.py info "${trackUrl}"`);
+    const res = JSON.parse(stdout.trim().split('\n').pop());
+    if (!res.success) throw new Error(res.error);
+    return res.data;
 }
 
 // Spotify Info
@@ -730,13 +702,12 @@ app.get('/spotify/info', async (req, res) => {
 
         const info = await fetchSpotifyInfo(url);
         res.json({
-            title: info.title,
-            artist: info.artist,
-            album: info.album,
-            duration: info.duration,
+            title:    info.title,
+            artist:   info.artist,
+            album:    info.album,
+            duration: info.durationStr,
             thumbnail: info.thumbnail,
-            download_url: info.download_url,
-            platform: 'spotify'
+            platform: 'spotify',
         });
     } catch (e) {
         res.status(400).json({ detail: `Gagal mengambil info Spotify: ${e.message}` });
@@ -763,11 +734,12 @@ app.get('/spotify/download', async (req, res) => {
 
         downloadProgress.set(task_id, { status: 'downloading', progress: 0.1, total: 'Fetching info...', speed: '' });
 
-        const info = await fetchSpotifyInfo(url);
+        downloadProgress.set(task_id, { status: 'downloading', progress: 0.5, total: 'Downloading (Please wait)...', speed: '' });
 
-        downloadProgress.set(task_id, { status: 'downloading', progress: 0.2, total: 'Downloading...', speed: '' });
-
-        await downloadStream(info.download_url, destPath, task_id, 0.2, 1.0);
+        const { stdout } = await execPromise(`python spotisaver.py download "${url}" "${destPath}"`);
+        const result = JSON.parse(stdout.trim().split('\n').pop());
+        if (!result.success) throw new Error(result.error);
+        const info = result.data;
 
         downloadProgress.set(task_id, { status: 'completed', progress: 1.0 });
 
