@@ -83,46 +83,79 @@ app.get('/proxy-image', async (req, res) => {
     }
 });
 
+// --- TikTok helpers ---
+
+async function fetchPrenivTiktok(url) {
+    const apiUrl = `https://prenivapi.vercel.app/api/tiktok?url=${encodeURIComponent(url)}`;
+    const resp = await axios.get(apiUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        timeout: 30000,
+    });
+    if (!resp.data.status || !resp.data.data) throw new Error('prenivapi returned unsuccessful response');
+    return resp.data.data;
+}
+
+async function fetchTikwmSlideshow(url) {
+    const clean = url.split('?')[0];
+    const resp = await axios.post('https://www.tikwm.com/api/', new URLSearchParams({ url: clean, hd: 1 }), {
+        headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 15000,
+    });
+    if (resp.data.code !== 0) throw new Error(resp.data.msg || 'TikWM error');
+    return resp.data.data;
+}
+
 // TikTok Info
 app.get('/tiktok/info', async (req, res) => {
     try {
-        let url = req.query.url;
-        if (!url) return res.status(400).json({ detail: "URL required" });
-        url = url.split('?')[0];
+        const url = req.query.url;
+        if (!url) return res.status(400).json({ detail: 'URL required' });
 
-        const response = await axios.post("https://www.tikwm.com/api/", new URLSearchParams({ url, hd: 1 }), {
-            headers: { "User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded" },
-            timeout: 15000
-        });
+        // ── Try prenivapi first ──────────────────────────────────────────
+        try {
+            const d = await fetchPrenivTiktok(url);
+            const downloads = d.downloads || {};
+            const videoList = downloads.video || [];
+            const title     = d.title     || 'TikTok Video';
+            const thumbnail = d.thumbnail || '';
+            const author    = d.author    || '';
+            const channel   = author ? `@${author}` : 'TikTok';
 
-        const data = response.data;
-        if (data.code !== 0) throw new Error(data.msg || "TikWM Error");
+            if (!videoList.length) throw new Error('No video URLs in prenivapi response');
 
-        const vdata = data.data;
-        const title = vdata.title || "TikTok Video";
-        const author = vdata.author || {};
-        const username = author.unique_id || "Unknown";
-        const nickname = author.nickname || username;
-        const playUrl = vdata.play || "";
-        const hdplayUrl = vdata.hdplay || "";
-        const images = vdata.images || [];
-        const isPhoto = images.length > 0;
-        let thumbnail = vdata.cover || vdata.origin_cover || (isPhoto ? images[0] : "");
+            const videoFormats = [];
+            if (videoList[0]) videoFormats.push({ resolution: 'HD Quality',       format_id: 'hd', ext: 'mp4', download_url: videoList[0].url });
+            if (videoList[1]) videoFormats.push({ resolution: 'Standard Quality', format_id: 'sd', ext: 'mp4', download_url: videoList[1].url });
+
+            return res.json({ title, thumbnail, channel, duration: 0, description: title,
+                video_formats: videoFormats, platform: 'tiktok', play_count: 0, is_photo: false });
+        } catch (prenivErr) {
+            console.log(`prenivapi failed (${prenivErr.message}), trying TikWM slideshow fallback`);
+        }
+
+        // ── Fallback: TikWM (slideshows + videos) ───────────────────────
+        const vdata    = await fetchTikwmSlideshow(url);
+        const title    = vdata.title || 'TikTok Video';
+        const author   = vdata.author || {};
+        const username = author.unique_id || 'Unknown';
+        const nickname = author.nickname  || username;
+        const images   = vdata.images || [];
+        const isPhoto  = images.length > 0;
+        const thumbnail = vdata.cover || vdata.origin_cover || (isPhoto ? images[0] : '');
 
         const videoFormats = [];
         if (isPhoto) {
-            images.forEach((img, idx) => {
-                videoFormats.push({ resolution: `Image ${idx + 1}`, format_id: `img_${idx}`, ext: "jpg", download_url: img });
-            });
+            images.forEach((img, idx) => videoFormats.push({
+                resolution: `Image ${idx + 1}`, format_id: `img_${idx}`, ext: 'jpg', download_url: img,
+            }));
         } else {
-            if (hdplayUrl) videoFormats.push({ resolution: "HD Quality", format_id: "hd", ext: "mp4", download_url: hdplayUrl });
-            if (playUrl && playUrl !== hdplayUrl) videoFormats.push({ resolution: "Standard Quality", format_id: "sd", ext: "mp4", download_url: playUrl });
+            if (vdata.hdplay) videoFormats.push({ resolution: 'HD Quality',       format_id: 'hd', ext: 'mp4', download_url: vdata.hdplay });
+            if (vdata.play && vdata.play !== vdata.hdplay) videoFormats.push({ resolution: 'Standard Quality', format_id: 'sd', ext: 'mp4', download_url: vdata.play });
         }
+        if (!videoFormats.length) throw new Error('No download URLs available');
 
-        res.json({
-            title, thumbnail, channel: `@${username} (${nickname})`, duration: vdata.duration || 0,
-            description: title, video_formats: videoFormats, platform: "tiktok", play_count: vdata.play_count || 0, is_photo: isPhoto
-        });
+        res.json({ title, thumbnail, channel: `@${username} (${nickname})`, duration: vdata.duration || 0,
+            description: title, video_formats: videoFormats, platform: 'tiktok',
+            play_count: vdata.play_count || 0, is_photo: isPhoto });
     } catch (e) {
         console.error(e);
         res.status(400).json({ detail: e.message });
@@ -193,123 +226,96 @@ function mergeAudio(videoPath, audioPath, outputPath) {
 app.get('/tiktok/download', async (req, res) => {
     let { url, format_id, task_id } = req.query;
     if (!task_id) task_id = crypto.randomUUID();
-    
+
     if (activeTasks.has(task_id)) {
         for (let i = 0; i < 60; i++) {
             const prog = downloadProgress.get(task_id);
-            if (prog?.status === "completed" && fs.existsSync(prog.final_path)) {
-                const fname = path.basename(prog.final_path);
-                return res.download(prog.final_path, fname);
+            if (prog?.status === 'completed' && prog.final_path && fs.existsSync(prog.final_path)) {
+                return res.download(prog.final_path, path.basename(prog.final_path));
             }
-            if (prog?.status === "error") return res.status(400).json({ detail: prog.error });
+            if (prog?.status === 'error') return res.status(400).json({ detail: prog.error });
             await new Promise(r => setTimeout(r, 1000));
         }
-        return res.status(408).json({ detail: "Timeout" });
+        return res.status(408).json({ detail: 'Timeout' });
     }
 
     activeTasks.add(task_id);
-    downloadProgress.set(task_id, { status: "starting", progress: 0.0 });
+    downloadProgress.set(task_id, { status: 'starting', progress: 0.0 });
     const baseName = `temp_${task_id}`;
 
     try {
-        url = url.split('?')[0];
-        const apiResp = await axios.post("https://www.tikwm.com/api/", new URLSearchParams({ url, hd: 1 }), {
-            headers: { "User-Agent": "Mozilla/5.0" }, timeout: 15000
-        });
-        const vdata = apiResp.data.data;
-        if (!vdata) throw new Error("No data from TikWM");
-        
-        const isPhoto = !!vdata.images;
-        const title = vdata.title || "tiktok";
-
-        if (isPhoto) {
+        // ── Slideshow: format_id starts with img_ → always use TikWM ────
+        if (format_id && format_id.startsWith('img_')) {
+            const vdata = await fetchTikwmSlideshow(url);
             const images = vdata.images || [];
-            const idx = parseInt((format_id || "img_0").replace("img_", "")) || 0;
+            const idx = parseInt(format_id.replace('img_', '')) || 0;
             const imgUrl = images[idx < images.length ? idx : 0];
             const imgPath = path.join(__dirname, `${baseName}_img${idx}.jpg`);
-            
             await downloadStream(imgUrl, imgPath, task_id, 0.1, 0.9);
-            downloadProgress.set(task_id, { status: "completed", progress: 1.0, final_path: imgPath });
-            
+            downloadProgress.set(task_id, { status: 'completed', progress: 1.0, final_path: imgPath });
             res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
-            const safe = `tiktok_${Date.now()}_img${idx + 1}`;
-            return res.download(imgPath, `${safe}.jpg`);
-        } else {
-            const videoUrl = (format_id === 'sd' && vdata.play) ? vdata.play : (vdata.hdplay || vdata.play);
-            if (!videoUrl) throw new Error("No video URL");
-            
-            const videoPath = path.join(__dirname, `${baseName}_video.mp4`);
-            
-            // If music track exists, download both and merge to fix low volume issues
-            if (vdata.music) {
-                const audioPath = path.join(__dirname, `${baseName}_audio.mp3`);
-                const mergedPath = path.join(__dirname, `${baseName}_merged.mp4`);
-                
-                // Download video to 50%
-                await downloadStream(videoUrl, videoPath, task_id, 0.05, 0.5);
-                
-                // Download audio to 90%
-                downloadProgress.set(task_id, { status: "downloading", progress: 0.5, total: "Fetching Audio...", speed: "" });
-                await downloadStream(vdata.music, audioPath, task_id, 0.5, 0.9);
-                
-                downloadProgress.set(task_id, { status: "downloading", progress: 0.9, total: "Mixing Audio...  ", speed: "" });
-                const success = mergeAudio(videoPath, audioPath, mergedPath);
-                
-                const finalPath = success ? mergedPath : videoPath;
-                downloadProgress.set(task_id, { status: "completed", progress: 1.0, final_path: finalPath });
-                const safeTitle = getSafeFilename(title, 60) || `tiktok_${Date.now()}`;
-                
-                res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
-                return res.download(finalPath, `${safeTitle}.mp4`);
-            } else {
-                await downloadStream(videoUrl, videoPath, task_id, 0.05, 1.0);
-                
-                downloadProgress.set(task_id, { status: "completed", progress: 1.0, final_path: videoPath });
-                const safeTitle = getSafeFilename(title, 60) || `tiktok_${Date.now()}`;
-                
-                res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
-                return res.download(videoPath, `${safeTitle}.mp4`);
-            }
+            return res.download(imgPath, `tiktok_${Date.now()}_img${idx + 1}.jpg`);
         }
+
+        // ── Video: try prenivapi first ────────────────────────────────────
+        let title    = 'tiktok';
+        let videoUrl = '';
+
+        try {
+            const d = await fetchPrenivTiktok(url);
+            title = d.title || 'tiktok';
+            const videoList = (d.downloads || {}).video || [];
+            if (!videoList.length) throw new Error('No video URLs in prenivapi response');
+            videoUrl = (format_id === 'sd' && videoList[1]) ? videoList[1].url : videoList[0].url;
+        } catch (prenivErr) {
+            console.log(`prenivapi download failed (${prenivErr.message}), falling back to TikWM`);
+            const vdata = await fetchTikwmSlideshow(url);
+            title    = vdata.title || 'tiktok';
+            videoUrl = (format_id === 'sd' && vdata.play) ? vdata.play : (vdata.hdplay || vdata.play);
+        }
+
+        if (!videoUrl) throw new Error('No video URL available');
+
+        const videoPath = path.join(__dirname, `${baseName}_video.mp4`);
+        await downloadStream(videoUrl, videoPath, task_id, 0.05, 1.0);
+
+        const safeTitle = getSafeFilename(title, 60) || `tiktok_${Date.now()}`;
+        downloadProgress.set(task_id, { status: 'completed', progress: 1.0, final_path: videoPath });
+        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+        return res.download(videoPath, `${safeTitle}.mp4`);
+
     } catch (e) {
         cleanupFiles(baseName);
-        downloadProgress.set(task_id, { status: "error", error: e.message });
+        downloadProgress.set(task_id, { status: 'error', error: e.message });
         activeTasks.delete(task_id);
         res.status(400).json({ detail: e.message });
     }
 });
 
-// TikTok Download All (ZIP)
+// TikTok Download All (ZIP) — slideshow only, stays on TikWM
 app.get('/tiktok/download/all', async (req, res) => {
     let { url, task_id } = req.query;
     if (!task_id) task_id = crypto.randomUUID();
     const baseName = `temp_tt_all_${task_id}`;
     const zipPath = path.join(__dirname, `${baseName}.zip`);
-    
-    downloadProgress.set(task_id, { status: "starting", progress: 0.0 });
+    downloadProgress.set(task_id, { status: 'starting', progress: 0.0 });
     try {
-        url = url.split('?')[0];
-        const apiResp = await axios.post("https://www.tikwm.com/api/", new URLSearchParams({ url, hd: 1 }));
-        const vdata = apiResp.data.data;
-        if (!vdata || !vdata.images) throw new Error("No photos found");
-        
-        const output = fs.createWriteStream(zipPath);
+        const vdata = await fetchTikwmSlideshow(url);
+        if (!vdata.images || !vdata.images.length) throw new Error('No photos found');
+
+        const output  = fs.createWriteStream(zipPath);
         const archive = archiver('zip', { zlib: { level: 5 } });
         archive.pipe(output);
-        
+
         for (let i = 0; i < vdata.images.length; i++) {
-            downloadProgress.set(task_id, { status: "downloading", progress: i / vdata.images.length });
+            downloadProgress.set(task_id, { status: 'downloading', progress: i / vdata.images.length });
             const imgRes = await axios.get(vdata.images[i], { responseType: 'stream' });
             archive.append(imgRes.data, { name: `media_${i + 1}.jpg` });
         }
-        await new Promise((resolve, reject) => {
-            output.on('close', resolve);
-            archive.on('error', reject);
-            archive.finalize();
-        });
-        downloadProgress.set(task_id, { status: "completed", progress: 1.0 });
-        
-        const safeTitle = getSafeFilename(vdata.title, 60) || "tiktok_photos";
+        await new Promise((resolve, reject) => { output.on('close', resolve); archive.on('error', reject); archive.finalize(); });
+        downloadProgress.set(task_id, { status: 'completed', progress: 1.0 });
+
+        const safeTitle = getSafeFilename(vdata.title, 60) || 'tiktok_photos';
         res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); });
         return res.download(zipPath, `${safeTitle}.zip`);
     } catch (e) {
