@@ -293,7 +293,7 @@ app.get('/tiktok/download', async (req, res) => {
             const imgPath = path.join(__dirname, `${baseName}_img${idx}.jpg`);
             await downloadStream(imgUrl, imgPath, task_id, 0.1, 0.9);
             downloadProgress.set(task_id, { status: 'completed', progress: 1.0, final_path: imgPath });
-            res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+            res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
             return res.download(imgPath, `tiktok_${Date.now()}_img${idx + 1}.jpg`);
         }
 
@@ -315,7 +315,7 @@ app.get('/tiktok/download', async (req, res) => {
 
         const safeTitle = getSafeFilename(title, 60) || `tiktok_${Date.now()}`;
         downloadProgress.set(task_id, { status: 'completed', progress: 1.0, final_path: videoPath });
-        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+        res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
         return res.download(videoPath, `${safeTitle}.mp4`);
 
     } catch (e) {
@@ -350,7 +350,7 @@ app.get('/tiktok/download/all', async (req, res) => {
         downloadProgress.set(task_id, { status: 'completed', progress: 1.0 });
 
         const safeTitle = getSafeFilename(vdata.title, 60) || 'tiktok_photos';
-        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); });
+        res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); });
         return res.download(zipPath, `${safeTitle}.zip`);
     } catch (e) {
         cleanupFiles(baseName);
@@ -529,7 +529,7 @@ app.get('/instagram/download', async (req, res) => {
         downloadProgress.set(task_id, { status: "completed", progress: 1.0 });
         const safeTitle = getSafeFilename(info.title, 60) || `instagram_${task_id}`;
         
-        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+        res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
         return res.download(destPath, `${safeTitle}.${format.ext}`);
     } catch (e) {
         cleanupFiles(baseName);
@@ -570,7 +570,7 @@ app.get('/instagram/download/all', async (req, res) => {
         downloadProgress.set(task_id, { status: "completed", progress: 1.0 });
         
         const safeTitle = getSafeFilename(info.title, 60) || "instagram";
-        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); });
+        res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); });
         return res.download(zipPath, `${safeTitle}.zip`);
     } catch (e) {
         cleanupFiles(baseName);
@@ -662,7 +662,7 @@ app.get('/download/video', async (req, res) => {
         await subprocess;
 
         downloadProgress.set(task_id, { status: "completed", progress: 1.0 });
-        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+        res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
         return res.download(destPath, `${safeTitle}.mp4`);
     } catch (e) {
         cleanupFiles(baseName);
@@ -702,7 +702,7 @@ app.get('/download/audio', async (req, res) => {
         await subprocess;
 
         downloadProgress.set(task_id, { status: "completed", progress: 1.0 });
-        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+        res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
         return res.download(destPath, `${safeTitle}.m4a`);
     } catch (e) {
         cleanupFiles(baseName);
@@ -806,7 +806,7 @@ app.get('/spotify/download', async (req, res) => {
         downloadProgress.set(task_id, { status: 'completed', progress: 1.0 });
 
         const safeTitle = getSafeFilename(`${info.artist} - ${info.title}`, 60) || `spotify_${task_id}`;
-        res.on('finish', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
+        res.on('close', () => { cleanupFiles(baseName); downloadProgress.delete(task_id); activeTasks.delete(task_id); });
         return res.download(destPath, `${safeTitle}.mp3`);
     } catch (e) {
         cleanupFiles(baseName);
@@ -818,4 +818,11 @@ app.get('/spotify/download', async (req, res) => {
 
 app.listen(port, () => {
     console.log(`Server listening on port ${port}`);
+    // Clean up any leftover temp files from previous runs
+    fs.readdir(__dirname, (err, files) => {
+        if (err) return;
+        files.filter(f => f.startsWith('temp_')).forEach(f => {
+            fs.unlink(path.join(__dirname, f), () => {});
+        });
+    });
 });
