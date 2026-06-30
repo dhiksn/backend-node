@@ -86,7 +86,8 @@ app.get('/proxy-image', async (req, res) => {
 // --- TikTok helpers ---
 
 async function fetchPrenivTiktok(url) {
-    const apiUrl = `https://prenivapi.vercel.app/api/tiktok?url=${encodeURIComponent(url)}`;
+    const cleanUrl = url.split('?')[0];
+    const apiUrl = `https://prenivapi.vercel.app/api/tiktok?url=${encodeURIComponent(cleanUrl)}`;
     const resp = await axios.get(apiUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
         timeout: 30000,
@@ -110,29 +111,53 @@ app.get('/tiktok/info', async (req, res) => {
         const url = req.query.url;
         if (!url) return res.status(400).json({ detail: 'URL required' });
 
-        // ── Try prenivapi first ──────────────────────────────────────────
-        try {
-            const d = await fetchPrenivTiktok(url);
-            const downloads = d.downloads || {};
-            const videoList = downloads.video || [];
-            const title     = d.title     || 'TikTok Video';
-            const thumbnail = d.thumbnail || '';
-            const author    = d.author    || '';
-            const channel   = author ? `@${author}` : 'TikTok';
+        // ── Deteksi slideshow dari URL — langsung pakai TikWM ────────────
+        const isLikelyPhoto = url.includes('/photo/');
 
-            if (!videoList.length) throw new Error('No video URLs in prenivapi response');
+        if (!isLikelyPhoto) {
+            // ── Try prenivapi untuk video biasa ──────────────────────────
+            try {
+                const d = await fetchPrenivTiktok(url);
+                const downloads = d.downloads || {};
+                const videoList = downloads.video || [];
+                const title     = d.title     || 'TikTok Video';
+                let   thumbnail = d.thumbnail || '';
+                let   author    = d.author    || '';
 
-            const videoFormats = [];
-            if (videoList[0]) videoFormats.push({ resolution: 'HD Quality',       format_id: 'hd', ext: 'mp4', download_url: videoList[0].url });
-            if (videoList[1]) videoFormats.push({ resolution: 'Standard Quality', format_id: 'sd', ext: 'mp4', download_url: videoList[1].url });
+                if (!videoList.length) throw new Error('No video URLs in prenivapi response');
 
-            return res.json({ title, thumbnail, channel, duration: 0, description: title,
-                video_formats: videoFormats, platform: 'tiktok', play_count: 0, is_photo: false });
-        } catch (prenivErr) {
-            console.log(`prenivapi failed (${prenivErr.message}), trying TikWM slideshow fallback`);
+                // prenivapi sering return author=null — ambil dari TikWM
+                if (!author) {
+                    try {
+                        const meta = await fetchTikwmSlideshow(url);
+                        const a = meta.author || {};
+                        const username = a.unique_id || '';
+                        const nickname = a.nickname  || '';
+                        if (username) {
+                            author = nickname && nickname !== username
+                                ? `${username} (${nickname})`
+                                : username;
+                        }
+                        if (!thumbnail) thumbnail = meta.cover || meta.origin_cover || '';
+                    } catch (_) {}
+                }
+
+                const channel = author ? `@${author}` : 'TikTok';
+
+                const videoFormats = [];
+                // downloads.video is an array of URL strings
+                const pickVidUrl = (item) => typeof item === 'string' ? item : (item?.url || '');
+                if (videoList[0]) videoFormats.push({ resolution: 'HD Quality',       format_id: 'hd', ext: 'mp4', download_url: pickVidUrl(videoList[0]) });
+                if (videoList[1]) videoFormats.push({ resolution: 'Standard Quality', format_id: 'sd', ext: 'mp4', download_url: pickVidUrl(videoList[1]) });
+
+                return res.json({ title, thumbnail, channel, duration: 0, description: title,
+                    video_formats: videoFormats, platform: 'tiktok', play_count: 0, is_photo: false });
+            } catch (prenivErr) {
+                console.log(`prenivapi failed (${prenivErr.message}), falling back to TikWM`);
+            }
         }
 
-        // ── Fallback: TikWM (slideshows + videos) ───────────────────────
+        // ── TikWM: untuk slideshow/foto atau ketika prenivapi gagal ─────
         const vdata    = await fetchTikwmSlideshow(url);
         const title    = vdata.title || 'TikTok Video';
         const author   = vdata.author || {};
@@ -164,11 +189,26 @@ app.get('/tiktok/info', async (req, res) => {
 
 // Helper to download stream and report progress
 async function downloadStream(url, destPath, taskId, startPct = 0, endPct = 1) {
+    // Pick a sensible Referer based on the download URL's hostname
+    let referer = 'https://www.tiktok.com/';
+    try {
+        const host = new URL(url).hostname;
+        if (host.includes('tiktokio'))   referer = 'https://tiktokio.com/';
+        else if (host.includes('tikwm')) referer = 'https://www.tikwm.com/';
+        else if (host.includes('snapsave') || host.includes('fbcdn') || host.includes('cdninstagram')) referer = 'https://snapsave.app/';
+    } catch (_) {}
+
     const writer = fs.createWriteStream(destPath);
     const response = await axios({
         url, method: 'GET', responseType: 'stream',
-        headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/" },
-        timeout: 60000
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": referer,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        timeout: 120000,
+        maxRedirects: 10,
     });
     const total = parseInt(response.headers['content-length'] || '0');
     let got = 0;
@@ -257,24 +297,18 @@ app.get('/tiktok/download', async (req, res) => {
             return res.download(imgPath, `tiktok_${Date.now()}_img${idx + 1}.jpg`);
         }
 
-        // ── Video: try prenivapi first ────────────────────────────────────
+        // ── Video: fetch from prenivapi ───────────────────────────────────
         let title    = 'tiktok';
         let videoUrl = '';
 
-        try {
-            const d = await fetchPrenivTiktok(url);
-            title = d.title || 'tiktok';
-            const videoList = (d.downloads || {}).video || [];
-            if (!videoList.length) throw new Error('No video URLs in prenivapi response');
-            videoUrl = (format_id === 'sd' && videoList[1]) ? videoList[1].url : videoList[0].url;
-        } catch (prenivErr) {
-            console.log(`prenivapi download failed (${prenivErr.message}), falling back to TikWM`);
-            const vdata = await fetchTikwmSlideshow(url);
-            title    = vdata.title || 'tiktok';
-            videoUrl = (format_id === 'sd' && vdata.play) ? vdata.play : (vdata.hdplay || vdata.play);
-        }
-
-        if (!videoUrl) throw new Error('No video URL available');
+        const d = await fetchPrenivTiktok(url);
+        title = d.title || 'tiktok';
+        const videoList = (d.downloads || {}).video || [];
+        if (!videoList.length) throw new Error('No video URLs in prenivapi response');
+        // downloads.video is an array of URL strings (not objects)
+        const pickUrl = (item) => typeof item === 'string' ? item : (item?.url || '');
+        videoUrl = (format_id === 'sd' && videoList[1]) ? pickUrl(videoList[1]) : pickUrl(videoList[0]);
+        if (!videoUrl) throw new Error('prenivapi video URL is empty');
 
         const videoPath = path.join(__dirname, `${baseName}_video.mp4`);
         await downloadStream(videoUrl, videoPath, task_id, 0.05, 1.0);
